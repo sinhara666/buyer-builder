@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buyer Builder</title>
+<meta name="description" content="Turn real words from real people into a panel of buyers, built from what your customers already said. Runs in your browser with your own free Groq key.">
+<style>
+:root{
+  --bg:#fdf5f1; --panel:#ffffff; --panel2:#fbeeea; --border:#eccfc4;
+  --text:#3d2b2b; --muted:#8a6d64; --accent:#b23a5e; --accentSoft:#f7d9de;
+  --gold:#c98a2d; --green:#3e7d4e; --red:#b03a2e; --grey:#7a6f6a; --radius:16px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;line-height:1.55}
+.wrap{max-width:820px;margin:0 auto;padding:20px 16px 80px}
+header.top{margin:10px 0 18px;text-align:center}
+.brand{font-weight:800;font-size:28px;color:var(--accent)}
+.brand small{display:block;font-weight:400;font-size:15px;color:var(--muted);margin-top:4px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin:0 0 16px;box-shadow:0 2px 10px rgba(178,58,94,.06)}
+h1{font-size:24px;margin:0 0 8px}
+h2{font-size:19px;margin:22px 0 10px;color:var(--accent)}
+h3{font-size:16px;margin:16px 0 6px}
+p{margin:0 0 12px}
+.muted{color:var(--muted);font-size:14px}
+label{display:block;font-weight:700;margin:16px 0 6px}
+textarea,input[type=text],input[type=password],input[type=number]{width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:12px;font-size:16px;font-family:inherit}
+textarea{min-height:96px;resize:vertical}
+textarea:focus,input:focus{outline:2px solid var(--accent);outline-offset:1px}
+.btn{display:inline-block;background:var(--accent);color:#fff;border:0;border-radius:10px;padding:14px 22px;font-size:17px;font-weight:800;cursor:pointer;margin-top:14px;width:100%}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent);width:auto;padding:9px 16px;font-size:14px;margin-top:8px}
+.buyer{border:1px solid var(--border);border-left:5px solid var(--accent);border-radius:10px;padding:6px 16px 12px;margin:0 0 12px;background:#fff}
+.buyer h3{color:var(--accent)}
+.pill{display:inline-block;border-radius:999px;padding:2px 12px;font-size:13px;font-weight:800;color:#fff;margin-left:8px;vertical-align:middle}
+.pill.yes{background:var(--green)}
+.pill.notyet{background:var(--gold)}
+.pill.no{background:var(--red)}
+.pill.none{background:var(--grey)}
+.verdict{border-radius:14px;padding:18px;text-align:center;margin:0 0 16px}
+.verdict .vword{font-size:30px;font-weight:900;letter-spacing:.5px}
+.verdict .vsub{font-size:15px;margin-top:4px}
+.verdict.yes{background:#e7f3ea;border:2px solid var(--green);color:var(--green)}
+.verdict.notyet{background:#fdf3e0;border:2px solid var(--gold);color:#8a5f14}
+.verdict.no{background:#fbe9e6;border:2px solid var(--red);color:var(--red)}
+.verdict.split{background:#fdf3e0;border:2px solid var(--gold);color:#8a5f14}
+.fixbox{background:var(--accentSoft);border:2px solid var(--accent);border-radius:12px;padding:16px 18px;margin-top:14px}
+.fixbox h2{margin-top:0}
+.err{background:#fbe9e6;border:1px solid var(--red);border-radius:10px;padding:12px;margin:12px 0;font-size:14px}
+.ok{background:#e7f3ea;border:1px solid var(--green);border-radius:10px;padding:12px;margin:12px 0;font-size:14px}
+.progress{height:12px;background:var(--panel2);border-radius:8px;overflow:hidden;margin:12px 0}
+.progress>div{height:100%;background:var(--accent);width:0%;transition:width .4s}
+.step-line{font-size:14px;color:var(--muted)}
+.md-body ul,.md-body ol{padding-left:22px;margin:0 0 12px}
+.md-body li{margin-bottom:6px}
+details.mdfile{margin-top:12px}
+details.mdfile summary{cursor:pointer;color:var(--accent);font-weight:700;font-size:14px}
+details.mdfile pre{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:13px;white-space:pre-wrap;word-wrap:break-word;max-height:340px;overflow:auto}
+footer{margin-top:30px;color:var(--muted);font-size:13px;text-align:center}
+@media (max-width:560px){ .brand{font-size:23px} .wrap{padding:14px 10px 70px} .verdict .vword{font-size:25px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="brand">Buyer Builder<small>Turn real words from real people into a panel of buyers, built from what your customers already said.</small></div>
+</header>
+<div id="app">
+
+<div class="card"><h1>Start here: your Groq key</h1>
+<div id="keySaved" style="display:none"><div class="ok">Your Groq key is in this page, ready to work. It is held in this page's memory only, never saved anywhere. Close this tab and it is gone.</div>
+<button class="btn ghost" id="btnChangeKey">Use a different key</button></div>
+<div id="keyForm"><p class="muted">This machine runs on a free key from Groq, in your own browser. Nothing here talks to any server except Groq itself.</p>
+<ol><li>Go to <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a> and sign up free.</li>
+<li>Open API Keys, create a key, and copy it.</li>
+<li>Paste it below. It is kept only in this page's memory, never saved to disk, and it is sent only to Groq.</li></ol>
+<label for="keyInput">Your Groq key (typing stays on this page, never saved)</label>
+<input type="password" id="keyInput" placeholder="gsk_..." autocomplete="off">
+<div id="keyErr"></div>
+<button class="btn" id="btnSaveKey">Save my key for this page</button></div>
+</div>
+
+<div class="card"><h1>Step 1: Your offer</h1>
+<p class="muted">First, your offer, in one plain line.</p>
+<label for="offerInput">My offer</label>
+<input type="text" id="offerInput" placeholder="What you are selling, in one plain line">
+<label for="priceInput">Its price</label>
+<input type="text" id="priceInput" placeholder="Its price, the way you would say it out loud">
+</div>
+
+<div class="card"><h1>Step 2: The real words</h1>
+<p class="muted">Now paste the real words your people actually said. One line at a time, one real line per line: things from reviews, comments, and messages. The buyers get built out of these words and nothing else, so real lines make real buyers.</p>
+<label for="wordsInput">Real lines from real people</label>
+<textarea id="wordsInput" style="min-height:130px" placeholder="Paste one real line per line, at least 3 lines..."></textarea>
+<div class="step-line" id="wordsCount">0 real lines so far. You need at least 3.</div>
+<div id="wordsErr"></div>
+</div>
+
+<div class="card"><h1>Step 3: Build your buyers</h1>
+<label for="countInput">How many buyers? (Leave it for 10)</label>
+<input type="number" id="countInput" min="1" max="30" placeholder="10">
+<div id="buildErr"></div>
+<div class="progress" id="buildProgWrap" style="display:none"><div id="buildProg"></div></div>
+<div class="step-line" id="buildStep"></div>
+<button class="btn" id="btnBuild">Build my buyers</button>
+<div id="buyersOut"></div>
+</div>
+
+</div>
+<footer>Runs in your browser with your own free Groq key. Your key lives only in this page's memory and goes only to Groq. Close the tab and it is gone.</footer>
+</div>
+<script>
+"use strict";
+
+/* ---------- the key: page memory only, never saved anywhere ---------- */
+var groqKey = "";
+var GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+var MODEL = "openai/gpt-oss-120b";
+
+/* ---------- tiny markdown renderer (same house renderer as the other machines) ---------- */
+function escHtml(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function inlineFmt(s){
+  s = escHtml(s);
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  return s;
+}
+function md(src){
+  var lines = String(src||"").split("\n"), out=[], i=0, listOpen=null;
+  function closeList(){ if(listOpen){ out.push(listOpen==="ul"?"</ul>":"</ol>"); listOpen=null; } }
+  while(i<lines.length){
+    var ln = lines[i];
+    var h = ln.match(/^(#{2,4})\s+(.*)/);
+    if(h){ closeList(); out.push("<h"+h[1].length+">"+inlineFmt(h[2])+"</h"+h[1].length+">"); i++; continue; }
+    var ul = ln.match(/^\s*[-*]\s+(.*)/);
+    if(ul){ if(listOpen!=="ul"){ closeList(); out.push("<ul>"); listOpen="ul"; } out.push("<li>"+inlineFmt(ul[1])+"</li>"); i++; continue; }
+    var ol = ln.match(/^\s*\d+[.)]\s+(.*)/);
+    if(ol){ if(listOpen!=="ol"){ closeList(); out.push("<ol>"); listOpen="ol"; } out.push("<li>"+inlineFmt(ol[1])+"</li>"); i++; continue; }
+    if(/^\s*$/.test(ln)){ closeList(); i++; continue; }
+    closeList();
+    out.push("<p>"+inlineFmt(ln)+"</p>"); i++;
+  }
+  closeList();
+  return out.join("\n");
+}
+
+/* ---------- Groq, called straight from this browser ----------
+   Every failure says the real reason in plain words. */
+function groqError(status, bodyText){
+  if(status === 401){ return new Error("Groq refused the key (401). The key Groq got was not accepted, so nothing ran. Paste a fresh key from console.groq.com at the top of this page and try again."); }
+  if(status === 429){ return new Error("Groq is rate limiting right now (429). Too many calls in a short time. Wait a minute and try again."); }
+  var detail = "";
+  try{
+    var d = JSON.parse(bodyText || "");
+    if(d && d.error && d.error.message){ detail = " Groq said: " + d.error.message; }
+  }catch(e){}
+  if(!detail && bodyText){ detail = " Groq said: " + String(bodyText).slice(0, 200); }
+  return new Error("Groq answered with an error (" + status + ")." + detail);
+}
+function groqChat(key, system, instruction){
+  var body;
+  try{
+    body = JSON.stringify({
+      model: MODEL,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: instruction }
+      ],
+      temperature: 0.7,
+      max_tokens: 8000,
+      reasoning_effort: "low"
+    });
+  }catch(e){ return Promise.reject(new Error("This page could not build the request to Groq. Reload the page and try again.")); }
+  var ctrl = ("AbortController" in window) ? new AbortController() : null;
+  var timer = null;
+  if(ctrl){ timer = setTimeout(function(){ try{ ctrl.abort(); }catch(e){} }, 120000); }
+  return fetch(GROQ_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+    body: body,
+    signal: ctrl ? ctrl.signal : undefined
+  }).then(function(resp){
+    if(timer) clearTimeout(timer);
+    return resp.text().then(function(text){
+      if(resp.status >= 200 && resp.status < 300){
+        var data;
+        try{ data = JSON.parse(text); }catch(e){ throw new Error("Groq answered, but this page could not read the answer. Run it again."); }
+        var content = data && data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
+        content = String(content || "").trim();
+        if(!content){ throw new Error("Groq answered, but the answer was empty. Run it again."); }
+        return content;
+      }
+      throw groqError(resp.status, text);
+    });
+  }).catch(function(err){
+    if(timer) clearTimeout(timer);
+    if(err && err.name === "AbortError"){ throw new Error("Groq took too long to answer (over 2 minutes) and this page stopped waiting. Check your connection and try again."); }
+    if(err instanceof TypeError){ throw new Error("Could not reach Groq at all. The browser never got through to api.groq.com. Check your internet connection, and any ad blocker or privacy tool that might block the call, then try again."); }
+    throw err;
+  });
+}
+
+/* ---------- the build (same words as the program) ---------- */
+function buildInstruction(offer, price, lines, count){
+  var words = lines.map(function(line){ return "- " + line; }).join("\n");
+  return "Build a panel of " + count + " buyers for this offer: " + offer
+    + " Price: " + price + ".\n"
+    + "Build them ONLY from these real words real people said:\n" + words + "\n"
+    + "Mix ready buyers, fence sitters, and skeptics. No two alike.\n"
+    + "For each buyer, write exactly this shape:\n"
+    + "## Buyer N: first name, who they are in a few words\n"
+    + "- Who they are:\n- Money right now:\n- What they want:\n"
+    + "- What stops them:\n- What makes them say yes:\n"
+    + "- In their words: one line the way they would really say it.\n"
+    + "Plain words. No marketing talk.";
+}
+var BUILD_SYSTEM = "You build honest buyer panels from real customer words.";
+
+function buyersMarkdown(offer, price, panel){
+  var today = new Date();
+  var stamp = today.getFullYear() + "-" + String(today.getMonth()+1).padStart(2,"0") + "-" + String(today.getDate()).padStart(2,"0");
+  return "# My Buyer Panel\nOffer: " + offer + " | Price: " + price + "\nBuilt: " + stamp + "\n\n" + panel + "\n";
+}
+
+function splitBuyers(panel){
+  var cards = [], current = [];
+  var raw = String(panel || "").split("\n");
+  for(var i=0;i<raw.length;i++){
+    var line = raw[i];
+    if(line.indexOf("## Buyer") === 0){
+      if(current.length){ cards.push(current.join("\n").trim()); }
+      current = [line];
+    } else if(current.length){
+      current.push(line);
+    }
+  }
+  if(current.length){ cards.push(current.join("\n").trim()); }
+  return cards.filter(function(card){ return !!card; });
+}
+function buyerName(card){
+  var first = String(card).split("\n")[0];
+  return first.split("## ").join("");
+}
+
+/* ---------- page state ---------- */
+var state = { offer: "", price: "", panel: "", cards: [], buyersMd: "" };
+function $(id){ return document.getElementById(id); }
+function errHtml(id, msg){ $(id).innerHTML = msg ? '<div class="err">' + escHtml(msg) + "</div>" : ""; }
+
+/* ---------- the real lines ---------- */
+function realLines(){
+  return $("wordsInput").value.split("\n").map(function(l){ return l.trim(); }).filter(function(l){ return !!l; });
+}
+function refreshWordsCount(){
+  var n = realLines().length;
+  $("wordsCount").textContent = n + (n === 1 ? " real line" : " real lines") + " so far." + (n < 3 ? " You need at least 3." : " That is enough to stand on.");
+}
+
+/* ---------- build ---------- */
+function doBuild(){
+  errHtml("buildErr", ""); errHtml("wordsErr", "");
+  var offer = $("offerInput").value.trim();
+  var price = $("priceInput").value.trim();
+  if(!groqKey){ errHtml("keyErr", "Save your Groq key at the top first, then build."); $("keyInput").focus(); window.scrollTo(0, 0); return; }
+  if(!offer){ errHtml("buildErr", "No offer, no panel. Put your offer in one plain line in Step 1 first."); return; }
+  var lines = realLines();
+  if(lines.length < 3){
+    errHtml("wordsErr", "Give me at least 3 real lines so the buyers have something true to stand on.");
+    $("wordsInput").focus();
+    return;
+  }
+  var sizeText = $("countInput").value.trim();
+  var count = (/^\d+$/.test(sizeText) && parseInt(sizeText, 10) > 0) ? parseInt(sizeText, 10) : 10;
+  var btn = $("btnBuild");
+  btn.disabled = true; btn.textContent = "Building...";
+  $("buildProgWrap").style.display = "";
+  $("buildProg").style.width = "35%";
+  $("buildStep").textContent = "Building your buyers from your real lines...";
+  $("buyersOut").innerHTML = "";
+  groqChat(groqKey, BUILD_SYSTEM, buildInstruction(offer, price, lines, count)).then(function(panel){
+    btn.disabled = false; btn.textContent = "Build my buyers";
+    $("buildProgWrap").style.display = "none"; $("buildStep").textContent = "";
+    state.offer = offer; state.price = price; state.panel = panel;
+    state.cards = splitBuyers(panel);
+    state.buyersMd = buyersMarkdown(offer, price, panel);
+    renderBuyers();
+    $("buyersOut").scrollIntoView({ behavior: "smooth" });
+  }).catch(function(err){
+    btn.disabled = false; btn.textContent = "Build my buyers";
+    $("buildProgWrap").style.display = "none"; $("buildStep").textContent = "";
+    errHtml("buildErr", err.message || String(err));
+  });
+}
+
+function renderBuyers(){
+  var out = $("buyersOut");
+  var html = "<h2>Your buyers</h2>";
+  if(state.cards.length){
+    for(var i=0;i<state.cards.length;i++){
+      html += '<div class="buyer md-body">' + md(state.cards[i]) + "</div>";
+    }
+  } else {
+    html += '<div class="err">No buyer cards were found in the panel, so there is nothing to run. The full answer is saved in your my-buyers.md below, word for word. Build again to try for cards.</div>';
+    html += '<div class="buyer md-body">' + md(state.panel) + "</div>";
+  }
+  html += '<p class="muted">Done. Your panel is ready below as my-buyers.md, the same file the program saves.</p>';
+  html += '<button class="btn ghost" id="btnDownload">Download my-buyers.md</button> ';
+  html += '<button class="btn ghost" id="btnCopyMd">Copy my-buyers.md</button>';
+  html += '<details class="mdfile"><summary>See the my-buyers.md file itself</summary><pre id="buyersMdPre">' + escHtml(state.buyersMd) + "</pre></details>";
+  out.innerHTML = html;
+  $("btnDownload").onclick = downloadBuyers;
+  $("btnCopyMd").onclick = function(){ copyText(state.buyersMd, this); };
+}
+
+function downloadBuyers(){
+  var blob = new Blob([state.buyersMd], { type: "text/markdown" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url; a.download = "my-buyers.md";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+}
+
+function copyText(t, btn){
+  function done(){ var o = btn.textContent; btn.textContent = "Copied"; setTimeout(function(){ btn.textContent = o; }, 1200); }
+  function fallback(){
+    var ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.position = "fixed"; ta.style.top = "0"; ta.style.left = "0";
+    ta.style.opacity = "0"; ta.setAttribute("readonly", "");
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    try{ document.execCommand("copy"); }catch(e){}
+    document.body.removeChild(ta);
+    done();
+  }
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(t).then(done, fallback);
+  } else fallback();
+}
+
+/* ---------- wire the page ---------- */
+function refreshKeyUI(){
+  var saved = !!groqKey;
+  $("keySaved").style.display = saved ? "" : "none";
+  $("keyForm").style.display = saved ? "none" : "";
+}
+function init(){
+  refreshKeyUI();
+  $("btnSaveKey").onclick = function(){
+    var k = $("keyInput").value.trim();
+    if(k.length < 10){ errHtml("keyErr", "That does not look like a full key. Paste the whole key."); return; }
+    errHtml("keyErr", "");
+    groqKey = k;
+    $("keyInput").value = "";
+    refreshKeyUI();
+  };
+  $("keyInput").addEventListener("keydown", function(ev){ if(ev.key === "Enter"){ ev.preventDefault(); $("btnSaveKey").click(); } });
+  $("btnChangeKey").onclick = function(){
+    groqKey = "";
+    refreshKeyUI();
+  };
+  $("wordsInput").addEventListener("input", refreshWordsCount);
+  refreshWordsCount();
+  $("btnBuild").onclick = doBuild;
+}
+init();
+</script>
+</body>
+</html>
