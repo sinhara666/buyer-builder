@@ -106,6 +106,17 @@ footer{margin-top:30px;color:var(--muted);font-size:13px;text-align:center}
 <div id="buyersOut"></div>
 </div>
 
+<div class="card" id="panelCard" style="display:none"><h1>Step 4: Run the blind panel</h1>
+<p class="muted">Want to run your panel now? Paste the post, offer, or price to judge. Every buyer is asked alone, in their own separate call. No buyer sees another buyer's answer before voting, and each one reasons it through out loud before their vote. The tally is counted here, in plain numbers.</p>
+<label for="thingInput">The post, offer, or price to judge</label>
+<textarea id="thingInput" style="min-height:130px" placeholder="Paste the thing to judge here..."></textarea>
+<div id="panelErr"></div>
+<div class="progress" id="panelProgWrap" style="display:none"><div id="panelProg"></div></div>
+<div class="step-line" id="panelStep"></div>
+<button class="btn" id="btnRunPanel">Run the blind panel</button>
+<div id="panelOut"></div>
+</div>
+
 </div>
 <footer>Runs in your browser with your own free Groq key. Your key lives only in this page's memory and goes only to Groq. Close the tab and it is gone.</footer>
 </div>
@@ -242,6 +253,73 @@ function buyerName(card){
   return first.split("## ").join("");
 }
 
+/* ---------- one buyer, alone, blind (same words as the program) ---------- */
+var BUYER_SYSTEM = "You are one buyer on a panel, answering alone and honestly, in your own voice.";
+function buyerInstruction(card, offer, price, thing){
+  return "Here is ONE buyer:\n" + card + "\n\n"
+    + "The offer: " + offer + " Price: " + price + ".\n"
+    + "Judge this:\n" + thing + "\n\n"
+    + "Answer as this buyer only, in their own voice.\n"
+    + "Before you vote, reason it through in these four steps, written out:\n"
+    + "1. Describe the kind of person who would say YES to this, "
+    + "the kind who would say NOT YET, and the kind who would say NO.\n"
+    + "2. Argue each answer from your own life as this buyer: "
+    + "why you might say YES, why you might say NOT YET, and why you might say NO.\n"
+    + "3. Weigh the three against each other and say which one fits you best.\n"
+    + "4. Then vote, fast and honest, on that reasoning.\n"
+    + "Keep it short, a line or two per step, the way you would really talk.\n"
+    + "Your very last line must be exactly one of these: "
+    + "VOTE: YES, or VOTE: NOT YET, or VOTE: NO.\n"
+    + "You are answering alone. You have not seen any other buyer's answer.";
+}
+function readVote(reply){
+  if(!reply){ return { vote: "NO ANSWER", body: "" }; }
+  var body = String(reply).trim();
+  if(!body){ return { vote: "NO ANSWER", body: "" }; }
+  var vote = "NO ANSWER";
+  var upper = body.toUpperCase();
+  var at = upper.lastIndexOf("VOTE:");
+  if(at >= 0){
+    var tail = upper.slice(at + "VOTE:".length).trim();
+    if(tail.indexOf("NOT YET") === 0){ vote = "NOT YET"; }
+    else if(tail.indexOf("YES") === 0){ vote = "YES"; }
+    else if(tail.indexOf("NO") === 0){ vote = "NO"; }
+  }
+  return { vote: vote, body: body };
+}
+
+/* ---------- the one fix (same words as the program) ---------- */
+var FIX_SYSTEM = "You read finished buyer panel votes and name the one fix that matters most.";
+function fixInstruction(offer, price, thing, votes){
+  var heard = votes.map(function(v){
+    return v.name + " said " + v.vote + ": " + v.reason;
+  }).join("\n");
+  return "These buyers each judged alone, with no buyer seeing another's answer.\n"
+    + "The offer: " + offer + " Price: " + price + ".\n"
+    + "What they judged:\n" + thing + "\n\n"
+    + "Their votes:\n" + heard + "\n\n"
+    + "Give the ONE fix that would move the most buyers toward yes.\n"
+    + "One or two plain sentences. No list, no marketing talk.";
+}
+
+/* ---------- tally, counted here in plain numbers (same rule as the program) ---------- */
+function tallyVotes(votes){
+  var yes = 0, notYet = 0, no = 0, noAnswer = 0;
+  for(var i=0;i<votes.length;i++){
+    if(votes[i].vote === "YES") yes++;
+    else if(votes[i].vote === "NOT YET") notYet++;
+    else if(votes[i].vote === "NO") no++;
+    else noAnswer++;
+  }
+  var total = votes.length;
+  var verdict, verdictClass, verdictLine;
+  if(yes * 2 > total){ verdict = "YES"; verdictClass = "yes"; verdictLine = "The panel says YES."; }
+  else if(no * 2 > total){ verdict = "NO"; verdictClass = "no"; verdictLine = "The panel says NO."; }
+  else if(notYet * 2 > total){ verdict = "NOT YET"; verdictClass = "notyet"; verdictLine = "The panel says NOT YET."; }
+  else { verdict = "No majority"; verdictClass = "split"; verdictLine = "No majority. The panel is split, and the split is the answer."; }
+  return { yes: yes, notYet: notYet, no: no, noAnswer: noAnswer, total: total, verdict: verdict, verdictClass: verdictClass, verdictLine: verdictLine };
+}
+
 /* ---------- page state ---------- */
 var state = { offer: "", price: "", panel: "", cards: [], buyersMd: "" };
 function $(id){ return document.getElementById(id); }
@@ -284,7 +362,8 @@ function doBuild(){
     state.cards = splitBuyers(panel);
     state.buyersMd = buyersMarkdown(offer, price, panel);
     renderBuyers();
-    $("buyersOut").scrollIntoView({ behavior: "smooth" });
+    $("panelCard").style.display = "";
+    $("panelCard").scrollIntoView({ behavior: "smooth" });
   }).catch(function(err){
     btn.disabled = false; btn.textContent = "Build my buyers";
     $("buildProgWrap").style.display = "none"; $("buildStep").textContent = "";
@@ -342,6 +421,87 @@ function copyText(t, btn){
   } else fallback();
 }
 
+/* ---------- the blind panel ----------
+   One separate call per buyer. Each call carries only that buyer's own card.
+   No buyer sees another buyer's answer before voting. Inside the call the
+   buyer reasons in four steps, then the VOTE: line comes last. The tally
+   is counted in code here, never by the AI. */
+function doRunPanel(){
+  errHtml("panelErr", "");
+  if(!state.cards.length){
+    errHtml("panelErr", "No buyer cards were found in the panel, so there is nothing to run. Build your buyers again first.");
+    return;
+  }
+  var thing = $("thingInput").value.trim();
+  if(!thing){
+    errHtml("panelErr", "Paste the post, offer, or price you want judged first. You can skip this step and run the panel later; your buyers stay on this page.");
+    return;
+  }
+  var btn = $("btnRunPanel");
+  btn.disabled = true; btn.textContent = "Running...";
+  var cards = state.cards;
+  var progWrap = $("panelProgWrap"), prog = $("panelProg"), step = $("panelStep");
+  progWrap.style.display = ""; prog.style.width = "6%";
+  step.textContent = "Asking " + cards.length + " buyers, one at a time, each one alone. 0 of " + cards.length + " buyers in.";
+  var slots = cards.map(function(card, i){
+    return '<div class="buyer" id="slot-' + i + '"><h3>' + escHtml(buyerName(card)) + '<span class="pill none">waiting</span></h3><div class="md-body slot-body"><p class="muted">This buyer is answering alone...</p></div></div>';
+  });
+  $("panelOut").innerHTML = "<h2>Each buyer, in their own words</h2>" + slots.join("") + '<div id="tallyOut"></div><div id="fixOut"></div>';
+
+  var answers = [];
+  for(var a=0; a<cards.length; a++){ answers.push(null); }
+  var answered = 0;
+  cards.forEach(function(card, idx){
+    groqChat(groqKey, BUYER_SYSTEM, buyerInstruction(card, state.offer, state.price, thing)).then(function(reply){
+      var parsed = readVote(reply);
+      answers[idx] = { name: buyerName(card), vote: parsed.vote, reason: parsed.body };
+    }).catch(function(err){
+      answers[idx] = { name: buyerName(card), vote: "NO ANSWER", reason: "", error: err.message || String(err) };
+    }).then(function(){
+      var ans = answers[idx];
+      var slot = $("slot-" + idx);
+      var pillClass = ans.vote === "YES" ? "yes" : (ans.vote === "NOT YET" ? "notyet" : (ans.vote === "NO" ? "no" : "none"));
+      var pillText = ans.vote === "NO ANSWER" ? "no answer" : ans.vote;
+      var bodyHtml;
+      if(ans.error){
+        bodyHtml = '<div class="err">No answer came back for this buyer, so this buyer is not counted as any vote. Why: ' + escHtml(ans.error) + "</div>";
+      } else {
+        bodyHtml = md(ans.reason);
+      }
+      slot.innerHTML = "<h3>" + escHtml(ans.name) + '<span class="pill ' + pillClass + '">' + escHtml(pillText) + '</span></h3><div class="md-body">' + bodyHtml + "</div>";
+      answered++;
+      prog.style.width = (6 + Math.round(answered / cards.length * 84)) + "%";
+      step.textContent = answered + " of " + cards.length + " buyers in.";
+      if(answered === cards.length){ finishPanel(thing, answers); }
+    });
+  });
+}
+
+function finishPanel(thing, answers){
+  var btn = $("btnRunPanel");
+  var tally = tallyVotes(answers);
+  progDone();
+  function progDone(){
+    $("panelProg").style.width = "100%";
+  }
+  var tallyLine = "Tally: YES " + tally.yes + ", NOT YET " + tally.notYet + ", NO " + tally.no + ", out of " + tally.total + " buyers."
+    + (tally.noAnswer ? " " + tally.noAnswer + (tally.noAnswer === 1 ? " buyer" : " buyers") + " returned no answer and counted as no vote." : "");
+  $("tallyOut").innerHTML = '<div class="verdict ' + tally.verdictClass + '"><div class="vword">' + escHtml(tally.verdictLine) + '</div><div class="vsub">' + escHtml(tallyLine) + "</div></div>";
+  $("panelStep").textContent = "All " + tally.total + " buyers in. Asking for the one fix...";
+  groqChat(groqKey, FIX_SYSTEM, fixInstruction(state.offer, state.price, thing, answers.map(function(a){
+    return { name: a.name, vote: a.vote, reason: a.reason };
+  }))).then(function(fix){
+    btn.disabled = false; btn.textContent = "Run the blind panel";
+    $("panelProgWrap").style.display = "none"; $("panelStep").textContent = "";
+    $("fixOut").innerHTML = '<div class="fixbox"><h2>The one fix</h2><div class="md-body">' + md(fix) + "</div></div>";
+    $("fixOut").scrollIntoView({ behavior: "smooth" });
+  }).catch(function(err){
+    btn.disabled = false; btn.textContent = "Run the blind panel";
+    $("panelProgWrap").style.display = "none"; $("panelStep").textContent = "";
+    $("fixOut").innerHTML = '<div class="err">The votes above are counted and final. The one fix did not come back. Why: ' + escHtml(err.message || String(err)) + "</div>";
+  });
+}
+
 /* ---------- wire the page ---------- */
 function refreshKeyUI(){
   var saved = !!groqKey;
@@ -366,6 +526,7 @@ function init(){
   $("wordsInput").addEventListener("input", refreshWordsCount);
   refreshWordsCount();
   $("btnBuild").onclick = doBuild;
+  $("btnRunPanel").onclick = doRunPanel;
 }
 init();
 </script>
