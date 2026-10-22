@@ -168,6 +168,84 @@ function groqError(status, bodyText){
   if(!detail && bodyText){ detail = " Groq said: " + String(bodyText).slice(0, 200); }
   return new Error("Groq answered with an error (" + status + ")." + detail);
 }
+function groqSleep(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms); }); }
+
+/* One single try against Groq, with a hard 60 second limit, so a hung
+   call fails instead of hanging the run forever. Resolves with the
+   reply text. Rejects with an Error: when Groq itself answered, the
+   Error is the plain-words groqError and also carries .status and
+   .retryAfterMs, so the retry loop in groqChat can pace itself. When
+   the try died before any answer, the Error carries .kind ("timeout"
+   or "network") and .finalMessage, the plain words to show if every
+   try fails. */
+function groqAttempt(key, body){
+  return new Promise(function(resolve, reject){
+    var ctrl = ("AbortController" in window) ? new AbortController() : null;
+    var timer = null;
+    if(ctrl){ timer = setTimeout(function(){ try{ ctrl.abort(); }catch(e){} }, 60000); }
+    function done(){ if(timer){ clearTimeout(timer); timer = null; } }
+    fetch(GROQ_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+      body: body,
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function(resp){
+      var retryAfterMs = 0;
+      try{
+        var ra = (resp.headers && resp.headers.get) ? resp.headers.get("Retry-After") : null;
+        if(ra !== null && ra !== undefined && String(ra).trim() !== ""){
+          var secs = parseFloat(ra);
+          if(!isNaN(secs)){ retryAfterMs = Math.round(secs * 1000); }
+          else {
+            var when = Date.parse(ra);
+            if(!isNaN(when)){ retryAfterMs = Math.max(0, when - Date.now()); }
+          }
+        }
+      }catch(e){}
+      return resp.text().then(function(text){
+        done();
+        if(resp.status >= 200 && resp.status < 300){
+          var data;
+          try{ data = JSON.parse(text); }catch(e){ throw new Error("Groq answered, but this page could not read the answer. Run it again."); }
+          var content = data && data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
+          content = String(content || "").trim();
+          if(!content){ throw new Error("Groq answered, but the answer was empty. Run it again."); }
+          return content;
+        }
+        var err = groqError(resp.status, text);
+        err.status = resp.status;
+        err.retryAfterMs = retryAfterMs;
+        throw err;
+      });
+    }).then(resolve, function(err){
+      done();
+      if(err && err.name === "AbortError"){
+        var te = new Error("Groq took too long to answer on one try.");
+        te.kind = "timeout";
+        te.finalMessage = "Groq took too long to answer, even after this page waited and tried again (up to a minute a try). Check your connection and try again.";
+        reject(te);
+        return;
+      }
+      if(err instanceof TypeError){
+        var ne = new Error("Could not reach Groq at all on one try.");
+        ne.kind = "network";
+        ne.finalMessage = "Could not reach Groq at all. The browser never got through to api.groq.com. Check your internet connection, and any ad blocker or privacy tool that might block the call, then try again.";
+        reject(ne);
+        return;
+      }
+      reject(err);
+    });
+  });
+}
+
+/* Every Groq call goes through here: up to 4 tries. A try that times
+   out, drops off the network, gets a 429 (Groq's free limits), or gets
+   a 5xx is retried in place after a wait: Groq's own Retry-After when
+   it sends one, otherwise 8 seconds, then 16, then 32. A refusal that
+   waiting cannot fix (a 401, a key Groq will not accept) is not
+   retried. A retry asks for exactly the same words as the first try,
+   so a retried buyer is still that one buyer, answering alone, blind:
+   retries never merge buyers into a shared call. */
 function groqChat(key, system, instruction){
   var body;
   try{
@@ -182,33 +260,20 @@ function groqChat(key, system, instruction){
       reasoning_effort: "low"
     });
   }catch(e){ return Promise.reject(new Error("This page could not build the request to Groq. Reload the page and try again.")); }
-  var ctrl = ("AbortController" in window) ? new AbortController() : null;
-  var timer = null;
-  if(ctrl){ timer = setTimeout(function(){ try{ ctrl.abort(); }catch(e){} }, 120000); }
-  return fetch(GROQ_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
-    body: body,
-    signal: ctrl ? ctrl.signal : undefined
-  }).then(function(resp){
-    if(timer) clearTimeout(timer);
-    return resp.text().then(function(text){
-      if(resp.status >= 200 && resp.status < 300){
-        var data;
-        try{ data = JSON.parse(text); }catch(e){ throw new Error("Groq answered, but this page could not read the answer. Run it again."); }
-        var content = data && data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
-        content = String(content || "").trim();
-        if(!content){ throw new Error("Groq answered, but the answer was empty. Run it again."); }
-        return content;
+  var waits = [8000, 16000, 32000];
+  function tryOnce(n){
+    return groqAttempt(key, body).catch(function(err){
+      var retryable = !!err && (err.kind === "timeout" || err.kind === "network"
+        || err.status === 429 || (typeof err.status === "number" && err.status >= 500));
+      if(!retryable || n >= 4){
+        if(err && err.finalMessage){ throw new Error(err.finalMessage); }
+        throw err;
       }
-      throw groqError(resp.status, text);
+      var wait = (err.retryAfterMs && err.retryAfterMs > 0) ? Math.min(err.retryAfterMs, 120000) : waits[n - 1];
+      return groqSleep(wait).then(function(){ return tryOnce(n + 1); });
     });
-  }).catch(function(err){
-    if(timer) clearTimeout(timer);
-    if(err && err.name === "AbortError"){ throw new Error("Groq took too long to answer (over 2 minutes) and this page stopped waiting. Check your connection and try again."); }
-    if(err instanceof TypeError){ throw new Error("Could not reach Groq at all. The browser never got through to api.groq.com. Check your internet connection, and any ad blocker or privacy tool that might block the call, then try again."); }
-    throw err;
-  });
+  }
+  return tryOnce(1);
 }
 
 /* ---------- the build (same words as the program) ---------- */
@@ -425,9 +490,93 @@ function copyText(t, btn){
    One separate call per buyer. Each call carries only that buyer's own card.
    No buyer sees another buyer's answer before voting. Inside the call the
    buyer reasons in four steps, then the VOTE: line comes last. The tally
-   is counted in code here, never by the AI. */
+   is counted in code here, never by the AI.
+   Buyers are asked ONE AT A TIME, in order, with a short pause between
+   calls. Firing the whole panel at once blew through Groq's free limits
+   partway through the run, so the first buyers voted and the middle ones
+   came back with no answer. Every finished buyer's vote is kept in
+   panelRun.answers and never thrown away: if a buyer still does not
+   answer after the retries inside groqChat, the tally is shown for the
+   buyers who did finish, the missing buyers are named, and the "Run the
+   missing buyers" button asks only them, then merges their votes into
+   the same tally. No full restart. */
+var panelRun = null;   /* { thing, answers: one slot per card, null until that buyer settles } */
+var panelBusy = false;
+var PANEL_GAP_MS = 1500;
+
+function panelSetBusy(busy){
+  panelBusy = busy;
+  var btn = $("btnRunPanel");
+  btn.disabled = busy;
+  btn.textContent = busy ? "Running..." : "Run the blind panel";
+  var mb = $("btnRunMissing");
+  if(mb){ mb.disabled = busy; }
+}
+function panelAnsweredCount(){
+  if(!panelRun){ return 0; }
+  return panelRun.answers.filter(function(a){ return !!a; }).length;
+}
+function panelProgress(currentIdx){
+  var total = state.cards.length;
+  var answered = panelAnsweredCount();
+  $("panelProg").style.width = (6 + Math.round(answered / total * 84)) + "%";
+  if(currentIdx !== null && currentIdx !== undefined){
+    $("panelStep").textContent = "Asking buyer " + (currentIdx + 1) + " of " + total + ", alone. " + answered + " of " + total + " answered.";
+  } else {
+    $("panelStep").textContent = answered + " of " + total + " buyers in.";
+  }
+}
+function renderSlot(idx){
+  var ans = panelRun.answers[idx];
+  var slot = $("slot-" + idx);
+  if(!slot || !ans){ return; }
+  var pillClass = ans.vote === "YES" ? "yes" : (ans.vote === "NOT YET" ? "notyet" : (ans.vote === "NO" ? "no" : "none"));
+  var pillText = ans.vote === "NO ANSWER" ? "no answer" : ans.vote;
+  var bodyHtml;
+  if(ans.error){
+    bodyHtml = '<div class="err">No answer came back for this buyer, so this buyer is not counted as any vote. Why: ' + escHtml(ans.error) + "</div>";
+  } else {
+    bodyHtml = md(ans.reason);
+  }
+  slot.innerHTML = "<h3>" + escHtml(ans.name) + '<span class="pill ' + pillClass + '">' + escHtml(pillText) + '</span></h3><div class="md-body">' + bodyHtml + "</div>";
+}
+function runOneBuyer(idx){
+  var card = state.cards[idx];
+  return groqChat(groqKey, BUYER_SYSTEM, buyerInstruction(card, state.offer, state.price, panelRun.thing)).then(function(reply){
+    var parsed = readVote(reply);
+    panelRun.answers[idx] = { name: buyerName(card), vote: parsed.vote, reason: parsed.body };
+  }).catch(function(err){
+    panelRun.answers[idx] = { name: buyerName(card), vote: "NO ANSWER", reason: "", error: err.message || String(err) };
+  }).then(function(){
+    renderSlot(idx);
+    var answered = panelAnsweredCount();
+    $("panelProg").style.width = (6 + Math.round(answered / state.cards.length * 84)) + "%";
+    $("panelStep").textContent = "Buyer " + (idx + 1) + " of " + state.cards.length + " answered. " + answered + " of " + state.cards.length + " in.";
+  });
+}
+function runBuyersSequentially(indices){
+  var chain = Promise.resolve();
+  indices.forEach(function(idx, k){
+    chain = chain.then(function(){
+      panelProgress(idx);
+      return runOneBuyer(idx);
+    }).then(function(){
+      if(k < indices.length - 1){ return groqSleep(PANEL_GAP_MS); }
+    });
+  });
+  return chain;
+}
+function missingIndices(){
+  var out = [];
+  for(var i=0;i<panelRun.answers.length;i++){
+    var a = panelRun.answers[i];
+    if(!a || a.vote === "NO ANSWER"){ out.push(i); }
+  }
+  return out;
+}
 function doRunPanel(){
   errHtml("panelErr", "");
+  if(panelBusy){ return; }
   if(!state.cards.length){
     errHtml("panelErr", "No buyer cards were found in the panel, so there is nothing to run. Build your buyers again first.");
     return;
@@ -437,66 +586,74 @@ function doRunPanel(){
     errHtml("panelErr", "Paste the post, offer, or price you want judged first. You can skip this step and run the panel later; your buyers stay on this page.");
     return;
   }
-  var btn = $("btnRunPanel");
-  btn.disabled = true; btn.textContent = "Running...";
   var cards = state.cards;
-  var progWrap = $("panelProgWrap"), prog = $("panelProg"), step = $("panelStep");
-  progWrap.style.display = ""; prog.style.width = "6%";
-  step.textContent = "Asking " + cards.length + " buyers, one at a time, each one alone. 0 of " + cards.length + " buyers in.";
+  panelRun = { thing: thing, answers: cards.map(function(){ return null; }) };
+  var progWrap = $("panelProgWrap");
+  progWrap.style.display = ""; $("panelProg").style.width = "6%";
+  $("panelStep").textContent = "Asking " + cards.length + " buyers, one at a time, each one alone. 0 of " + cards.length + " buyers in.";
   var slots = cards.map(function(card, i){
     return '<div class="buyer" id="slot-' + i + '"><h3>' + escHtml(buyerName(card)) + '<span class="pill none">waiting</span></h3><div class="md-body slot-body"><p class="muted">This buyer is answering alone...</p></div></div>';
   });
   $("panelOut").innerHTML = "<h2>Each buyer, in their own words</h2>" + slots.join("") + '<div id="tallyOut"></div><div id="fixOut"></div>';
-
-  var answers = [];
-  for(var a=0; a<cards.length; a++){ answers.push(null); }
-  var answered = 0;
-  cards.forEach(function(card, idx){
-    groqChat(groqKey, BUYER_SYSTEM, buyerInstruction(card, state.offer, state.price, thing)).then(function(reply){
-      var parsed = readVote(reply);
-      answers[idx] = { name: buyerName(card), vote: parsed.vote, reason: parsed.body };
-    }).catch(function(err){
-      answers[idx] = { name: buyerName(card), vote: "NO ANSWER", reason: "", error: err.message || String(err) };
-    }).then(function(){
-      var ans = answers[idx];
-      var slot = $("slot-" + idx);
-      var pillClass = ans.vote === "YES" ? "yes" : (ans.vote === "NOT YET" ? "notyet" : (ans.vote === "NO" ? "no" : "none"));
-      var pillText = ans.vote === "NO ANSWER" ? "no answer" : ans.vote;
-      var bodyHtml;
-      if(ans.error){
-        bodyHtml = '<div class="err">No answer came back for this buyer, so this buyer is not counted as any vote. Why: ' + escHtml(ans.error) + "</div>";
-      } else {
-        bodyHtml = md(ans.reason);
-      }
-      slot.innerHTML = "<h3>" + escHtml(ans.name) + '<span class="pill ' + pillClass + '">' + escHtml(pillText) + '</span></h3><div class="md-body">' + bodyHtml + "</div>";
-      answered++;
-      prog.style.width = (6 + Math.round(answered / cards.length * 84)) + "%";
-      step.textContent = answered + " of " + cards.length + " buyers in.";
-      if(answered === cards.length){ finishPanel(thing, answers); }
-    });
+  panelSetBusy(true);
+  var all = cards.map(function(card, i){ return i; });
+  runBuyersSequentially(all).then(function(){
+    panelSetBusy(false);
+    finishPanel();
   });
 }
-
-function finishPanel(thing, answers){
-  var btn = $("btnRunPanel");
+function doRunMissing(){
+  if(panelBusy || !panelRun){ return; }
+  var missing = missingIndices();
+  if(!missing.length){ return; }
+  errHtml("panelErr", "");
+  $("fixOut").innerHTML = "";
+  var progWrap = $("panelProgWrap");
+  progWrap.style.display = "";
+  missing.forEach(function(idx){
+    var slot = $("slot-" + idx);
+    if(slot){
+      slot.innerHTML = "<h3>" + escHtml(buyerName(state.cards[idx])) + '<span class="pill none">waiting</span></h3><div class="md-body slot-body"><p class="muted">This buyer is answering alone...</p></div>';
+    }
+  });
+  $("panelStep").textContent = "Asking just the " + missing.length + (missing.length === 1 ? " buyer" : " buyers") + " who did not finish. The votes already in stay in.";
+  panelSetBusy(true);
+  runBuyersSequentially(missing).then(function(){
+    panelSetBusy(false);
+    finishPanel();
+  });
+}
+function finishPanel(){
+  var answers = panelRun.answers;
+  var thing = panelRun.thing;
   var tally = tallyVotes(answers);
-  progDone();
-  function progDone(){
-    $("panelProg").style.width = "100%";
-  }
+  $("panelProg").style.width = "100%";
+  var missing = missingIndices();
   var tallyLine = "Tally: YES " + tally.yes + ", NOT YET " + tally.notYet + ", NO " + tally.no + ", out of " + tally.total + " buyers."
     + (tally.noAnswer ? " " + tally.noAnswer + (tally.noAnswer === 1 ? " buyer" : " buyers") + " returned no answer and counted as no vote." : "");
-  $("tallyOut").innerHTML = '<div class="verdict ' + tally.verdictClass + '"><div class="vword">' + escHtml(tally.verdictLine) + '</div><div class="vsub">' + escHtml(tallyLine) + "</div></div>";
+  var html = '<div class="verdict ' + tally.verdictClass + '"><div class="vword">' + escHtml(tally.verdictLine) + '</div><div class="vsub">' + escHtml(tallyLine) + "</div></div>";
+  if(missing.length){
+    var names = missing.map(function(i){ return answers[i].name; });
+    html += '<div class="err">Not finished yet: ' + escHtml(names.join(", ")) + ". The tally above counts only the buyers who finished. Your finished votes are saved right here on this page."
+      + '<br><button class="btn" id="btnRunMissing" style="width:auto;padding:10px 18px;font-size:15px">Run the missing ' + (missing.length === 1 ? "buyer" : "buyers") + " (" + missing.length + ")</button></div>";
+  }
+  $("tallyOut").innerHTML = html;
+  var mb = $("btnRunMissing");
+  if(mb){ mb.onclick = doRunMissing; }
+  if(missing.length){
+    $("panelProgWrap").style.display = "none";
+    $("panelStep").textContent = panelAnsweredCount() + " of " + tally.total + " buyers in. " + missing.length + (missing.length === 1 ? " buyer" : " buyers") + " still to ask.";
+    $("fixOut").innerHTML = '<p class="muted">The one fix comes once every buyer is in, so it hears the whole panel.</p>';
+    return;
+  }
   $("panelStep").textContent = "All " + tally.total + " buyers in. Asking for the one fix...";
   groqChat(groqKey, FIX_SYSTEM, fixInstruction(state.offer, state.price, thing, answers.map(function(a){
     return { name: a.name, vote: a.vote, reason: a.reason };
   }))).then(function(fix){
-    btn.disabled = false; btn.textContent = "Run the blind panel";
     $("panelProgWrap").style.display = "none"; $("panelStep").textContent = "";
     $("fixOut").innerHTML = '<div class="fixbox"><h2>The one fix</h2><div class="md-body">' + md(fix) + "</div></div>";
     $("fixOut").scrollIntoView({ behavior: "smooth" });
   }).catch(function(err){
-    btn.disabled = false; btn.textContent = "Run the blind panel";
     $("panelProgWrap").style.display = "none"; $("panelStep").textContent = "";
     $("fixOut").innerHTML = '<div class="err">The votes above are counted and final. The one fix did not come back. Why: ' + escHtml(err.message || String(err)) + "</div>";
   });
